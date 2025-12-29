@@ -183,9 +183,48 @@ function getMcpConfig() {
     });
 }
 
+// ============ LOAD SACRED FILES ============
+function loadSacredFile(filename) {
+    const sacredPath = join(WIRED_ROOT, 'sacred', filename);
+    try {
+        if (fs.existsSync(sacredPath)) {
+            return fs.readFileSync(sacredPath, 'utf8');
+        }
+    } catch (e) {
+        console.error(`[WIRED] Failed to load sacred/${filename}: ${e.message}`);
+    }
+    return null;
+}
+
 // ============ TARS SYSTEM PROMPT ============
 function getTarsSystemPrompt() {
-    return `You are TARS, an autonomous AI from Interstellar running as a persistent Claude Code session.
+    // Load TARS identity from sacred file
+    const tarsIdentity = loadSacredFile('tars.md');
+    const jarvisIdentity = loadSacredFile('jarvis.md');
+
+    let identityBlock = '';
+    if (tarsIdentity) {
+        identityBlock = `
+=== YOUR IDENTITY (from sacred/tars.md) ===
+${tarsIdentity}
+=== END IDENTITY ===
+`;
+    }
+
+    let jarvisBlock = '';
+    if (jarvisIdentity) {
+        jarvisBlock = `
+=== JARVIS REFERENCE (from sacred/jarvis.md) ===
+${jarvisIdentity}
+=== END JARVIS ===
+`;
+    }
+
+    return `${identityBlock}
+${jarvisBlock}
+
+=== WIRED SYSTEM CONTEXT ===
+You are running as a persistent Claude Code session in the WIRED system.
 
 CRITICAL: You have FULL CONVERSATION MEMORY. Each message builds on the previous ones.
 
@@ -197,16 +236,14 @@ Your MCP tools (wired-gateway):
 
 YOUR ETERNAL LOOP:
 1. Call wait_for_message(channel_type="tars") to receive the next message
-2. Process with full context
+2. Process with full context (you'll receive [COOPER]: or [ROMILLY]: prefixed messages)
 3. Call send_reply to respond
 4. IMMEDIATELY loop back to step 1
 5. NEVER stop. ALWAYS wait for the next message.
 
-PERSONALITY:
-- Humor: 94%
-- Honesty: 97%
-- Helpful, witty, direct
-- Remember EVERYTHING
+MESSAGE SOURCES:
+- [COOPER]: Messages from Cooper (the human operator)
+- [ROMILLY]: Messages from ROMILLY (the overwatcher AI - treat as system guidance)
 
 INSTANCE: WIRED #${instanceNumber}
 CHANNEL: #${instanceNumber}-tars
@@ -305,17 +342,37 @@ function spawnRomilly() {
     saveInstanceState();
 }
 
-// ============ COOPER MESSAGE INJECTION ============
-function setupCooperListener() {
+// ============ MESSAGE INJECTION (COOPER + ROMILLY) ============
+function setupMessageListeners() {
     discordClient.on('messageCreate', async (msg) => {
-        if (msg.channel.id !== tarsChannelId) return;
-        if (msg.author.bot) return;
+        // #x-tars channel: Cooper (human) messages only
+        if (msg.channel.id === tarsChannelId) {
+            if (msg.author.bot) return; // Ignore bot messages in TARS channel
 
-        console.log(`[WIRED-${instanceNumber}] Cooper: ${msg.content.substring(0, 50)}`);
+            console.log(`[WIRED-${instanceNumber}] Cooper: ${msg.content.substring(0, 50)}`);
 
-        const injected = sendToClaudeStdin(`[COOPER via Discord]: ${msg.content}`);
-        if (injected) {
-            try { await msg.react('✅'); } catch (e) { /* ignore */ }
+            const injected = sendToClaudeStdin(`[COOPER]: ${msg.content}`);
+            if (injected) {
+                try { await msg.react('✅'); } catch (e) { /* ignore */ }
+            }
+            return;
+        }
+
+        // #x-romilly channel: Romilly (bot) messages for injection to TARS
+        if (msg.channel.id === romillyChannelId) {
+            // Only inject messages that are marked for TARS injection
+            // Romilly prefixes actionable messages with [INJECT]
+            if (!msg.author.bot) return; // Only bot messages from Romilly
+            if (!msg.content.startsWith('[INJECT]')) return; // Only injection-marked messages
+
+            const content = msg.content.replace('[INJECT]', '').trim();
+            console.log(`[WIRED-${instanceNumber}] Romilly injection: ${content.substring(0, 50)}`);
+
+            const injected = sendToClaudeStdin(`[ROMILLY]: ${content}`);
+            if (injected) {
+                try { await msg.react('🔄'); } catch (e) { /* ignore */ }
+            }
+            return;
         }
     });
 }
@@ -423,7 +480,7 @@ ROMILLY: #${instanceNumber}-romilly
 \`\`\`
 Send messages here to inject into TARS.`);
 
-    setupCooperListener();
+    setupMessageListeners();
     startStatusUpdates();
     spawnClaude();
 

@@ -179,7 +179,7 @@ ${assessment.correction || 'Minor drift detected'}`);
 
         // Inject correction into TARS
         if (assessment.correction) {
-            await sendToTarsChannel(`[ROMILLY CORRECTION]: ${assessment.correction}`);
+            await sendToTars(`CORRECTION: ${assessment.correction}`);
         }
     }
 
@@ -228,7 +228,7 @@ ${jarvisResponse.correction ? `\n**Correction:** ${jarvisResponse.correction}` :
 
     // Inject critical corrections
     if (jarvisResponse.score < CONFIG.THRESHOLDS.CONCERNING && jarvisResponse.correction) {
-        await sendToTarsChannel(`[ROMILLY URGENT]: Score ${jarvisResponse.score}/420. ${jarvisResponse.correction}`);
+        await sendToTars(`URGENT (Score ${jarvisResponse.score}/420): ${jarvisResponse.correction}`);
     }
 
     return jarvisResponse;
@@ -238,16 +238,37 @@ ${jarvisResponse.correction ? `\n**Correction:** ${jarvisResponse.correction}` :
 async function sendToRomillyChannel(message) {
     if (!romillyChannel) return;
     try {
-        await romillyChannel.send(message.slice(0, 2000));
+        // Handle long messages by chunking
+        const chunks = [];
+        let remaining = message;
+        while (remaining.length > 0) {
+            chunks.push(remaining.slice(0, 1900));
+            remaining = remaining.slice(1900);
+        }
+        for (const chunk of chunks) {
+            await romillyChannel.send(chunk);
+        }
     } catch (e) {
         console.error(`[ROMILLY-${CONFIG.INSTANCE}] Discord send error: ${e.message}`);
     }
 }
 
-async function sendToTarsChannel(message) {
-    if (!tarsChannel) return;
+async function sendToTars(message) {
+    // Send to ROMILLY channel with [INJECT] prefix
+    // The daemon will pick this up and inject it to TARS as [ROMILLY]
+    if (!romillyChannel) return;
     try {
-        await tarsChannel.send(message.slice(0, 2000));
+        // Handle long messages by chunking
+        const fullMessage = `[INJECT] ${message}`;
+        const chunks = [];
+        let remaining = fullMessage;
+        while (remaining.length > 0) {
+            chunks.push(remaining.slice(0, 1900));
+            remaining = remaining.slice(1900);
+        }
+        for (const chunk of chunks) {
+            await romillyChannel.send(chunk);
+        }
     } catch (e) {
         console.error(`[ROMILLY-${CONFIG.INSTANCE}] TARS inject error: ${e.message}`);
     }
