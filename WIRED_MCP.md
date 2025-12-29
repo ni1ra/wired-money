@@ -37,6 +37,7 @@ WIRED uses the Model Context Protocol (MCP) to enable communication between Clau
 
 ## Channel Rules
 **#x-tars**: Cooper (human) → TARS only. **#x-romilly**: Romilly reports here; messages prefixed `[INJECT]` get forwarded to TARS as `[ROMILLY]:`.
+**Lifecycle**: On shutdown, instance deletes its channels + category, freeing the slot (e.g., #1 killed → next instance gets #1).
 
 ## MCP Tools
 

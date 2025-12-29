@@ -415,23 +415,56 @@ async function shutdown(signal) {
 
     if (statusTimer) clearInterval(statusTimer);
 
-    try {
-        const channel = await discordClient.channels.fetch(tarsChannelId);
-        if (channel) await channel.send(`**WIRED #${instanceNumber} SHUTDOWN** - ${signal}`);
-    } catch (e) { /* ignore */ }
-
+    // Kill child processes first
     if (romillyProcess) romillyProcess.kill('SIGTERM');
     if (claudeProcess) claudeProcess.kill('SIGTERM');
 
     setTimeout(() => {
         if (claudeProcess && !claudeProcess.killed) claudeProcess.kill('SIGKILL');
         if (romillyProcess && !romillyProcess.killed) romillyProcess.kill('SIGKILL');
-    }, 3000);
+    }, 2000);
+
+    // Delete instance channels and category (frees up instance number)
+    try {
+        const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
+        if (guild) {
+            // Send goodbye message before deletion
+            const tarsChannel = await discordClient.channels.fetch(tarsChannelId).catch(() => null);
+            if (tarsChannel) {
+                await tarsChannel.send(`**WIRED #${instanceNumber} SHUTDOWN** - ${signal}\nChannels will be deleted in 3s...`);
+            }
+
+            await new Promise(r => setTimeout(r, 3000));
+
+            // Delete channels
+            const romillyChannel = await discordClient.channels.fetch(romillyChannelId).catch(() => null);
+            if (romillyChannel) {
+                console.log(`[WIRED-${instanceNumber}] Deleting #${instanceNumber}-romilly...`);
+                await romillyChannel.delete().catch(e => console.error(`Delete romilly failed: ${e.message}`));
+            }
+            if (tarsChannel) {
+                console.log(`[WIRED-${instanceNumber}] Deleting #${instanceNumber}-tars...`);
+                await tarsChannel.delete().catch(e => console.error(`Delete tars failed: ${e.message}`));
+            }
+
+            // Delete category if empty
+            const categoryName = `INSTANCE #${instanceNumber}`;
+            const category = guild.channels.cache.find(c => c.name === categoryName);
+            if (category && category.children?.cache?.size === 0) {
+                console.log(`[WIRED-${instanceNumber}] Deleting category ${categoryName}...`);
+                await category.delete().catch(e => console.error(`Delete category failed: ${e.message}`));
+            }
+
+            console.log(`[WIRED-${instanceNumber}] Instance #${instanceNumber} slot freed`);
+        }
+    } catch (e) {
+        console.error(`[WIRED-${instanceNumber}] Channel cleanup error: ${e.message}`);
+    }
 
     cleanupInstanceState();
     if (discordClient) discordClient.destroy();
 
-    setTimeout(() => process.exit(0), 4000);
+    setTimeout(() => process.exit(0), 5000);
 }
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
