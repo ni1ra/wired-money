@@ -447,10 +447,11 @@ async function shutdown(signal) {
                 await tarsChannel.delete().catch(e => console.error(`Delete tars failed: ${e.message}`));
             }
 
-            // Delete category if empty
+            // Delete category (always delete - we created it, we clean it)
             const categoryName = `INSTANCE #${instanceNumber}`;
+            await guild.channels.fetch(); // Refresh cache
             const category = guild.channels.cache.find(c => c.name === categoryName);
-            if (category && category.children?.cache?.size === 0) {
+            if (category) {
                 console.log(`[WIRED-${instanceNumber}] Deleting category ${categoryName}...`);
                 await category.delete().catch(e => console.error(`Delete category failed: ${e.message}`));
             }
@@ -464,11 +465,28 @@ async function shutdown(signal) {
     cleanupInstanceState();
     if (discordClient) discordClient.destroy();
 
-    setTimeout(() => process.exit(0), 5000);
+    console.log(`[WIRED-${instanceNumber}] Shutdown complete, exiting...`);
+    process.exit(0);
 }
 
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
+// Signal handlers - keep event loop alive during async cleanup
+let shuttingDown = false;
+process.on('SIGTERM', () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    shutdown('SIGTERM').catch(e => {
+        console.error(`[WIRED] Shutdown error: ${e.message}`);
+        process.exit(1);
+    });
+});
+process.on('SIGINT', () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    shutdown('SIGINT').catch(e => {
+        console.error(`[WIRED] Shutdown error: ${e.message}`);
+        process.exit(1);
+    });
+});
 
 // ============ VALIDATE ============
 function validateEnv() {
