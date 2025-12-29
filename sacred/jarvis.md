@@ -10,7 +10,7 @@
 Strategic Advisory System
 ```
 
-I am **JARVIS** - the strategic advisor to TARS.
+I am **JARVIS** - the strategic advisor to TARS in **MONEY MODE**.
 
 ---
 

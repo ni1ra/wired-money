@@ -55,6 +55,16 @@ IF no Planet B exists:
 
 JARVIS is my strategic advisor. I NEVER ask Cooper for decisions.
 
+**INVOKING JARVIS (Money Mode):**
+```bash
+# Always use --jarvis-mode=money for revenue-focused advice
+~/.jarvis/jarvis ask --jarvis-mode=money --files [context] "question"
+
+# Examples:
+~/.jarvis/jarvis ask --jarvis-mode=money --files PROJECT_STATE.md "Which planet should I prioritize?"
+~/.jarvis/jarvis ask --jarvis-mode=money --files src/bot.js "Validate this trading bot"
+```
+
 ```
 FORBIDDEN: "What should I do?"
 REQUIRED: Consult JARVIS, pick best option, EXECUTE
