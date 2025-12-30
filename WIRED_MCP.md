@@ -133,27 +133,36 @@ Initiates migration of the WIRED instance to another machine.
 
 ## Message Flow
 
-### Cooper → TARS
+TARS has **3 background listeners** for incoming messages:
 
-1. Cooper sends message in `#N-tars` Discord channel
-2. WIRED Gateway captures message, adds to TARS queue
-3. Claude's `wait_for_message` returns with the message
+### 1. Lain (Andreas) → TARS (Discord)
+
+1. Lain (the human founder) sends message in `#N-tars` Discord channel
+2. WIRED Daemon captures message via Discord.js
+3. Message injected into Claude stdin as `[LAIN]: ...`
 4. Claude processes and calls `send_reply`
 5. Response appears in Discord
 
-### ROMILLY → Discord
+### 2. Cooper → TARS (HTTP API)
 
-1. ROMILLY calls `send_reply` with `channel_type="romilly"`
-2. Message appears in `#N-romilly` channel
-3. For urgent corrections, ROMILLY also sends to `#N-tars`
+1. Cooper (monitoring Claude Code instance) calls HTTP endpoint
+2. `POST http://localhost:3420/inject` with `{source: "COOPER", content: "message"}`
+3. WIRED Daemon injects into Claude stdin as `[COOPER]: ...`
+4. TARS processes in conversation context
 
-### TARS → ROMILLY (Injection)
+### 3. ROMILLY → TARS (IPC)
 
-When ROMILLY detects alignment drift:
-1. ROMILLY sends correction to `#N-tars` channel
-2. WIRED Daemon captures message
-3. Message injected into Claude stdin as `[ROMILLY CORRECTION]: ...`
-4. TARS processes correction in conversation context
+1. ROMILLY detects alignment drift
+2. Calls `process.send({ type: 'inject', content: 'message' })`
+3. WIRED Daemon (parent process) receives via IPC
+4. Message injected into Claude stdin as `[ROMILLY]: ...`
+5. TARS processes correction in conversation context
+
+### ROMILLY → Discord (Reports Only)
+
+1. ROMILLY runs periodic checks and audits
+2. Reports appear in `#N-romilly` channel
+3. Status/audit messages are for logging only (NOT injected to TARS)
 
 ---
 
@@ -161,8 +170,8 @@ When ROMILLY detects alignment drift:
 
 | Channel | Purpose | Writers |
 |---------|---------|---------|
-| `#N-tars` | TARS ↔ Cooper communication | Cooper, TARS, ROMILLY (urgent) |
-| `#N-romilly` | ROMILLY status and audits | ROMILLY only |
+| `#N-tars` | TARS ↔ Cooper communication | Cooper, TARS |
+| `#N-romilly` | ROMILLY status/audits + TARS injection | ROMILLY only |
 
 ---
 
@@ -373,3 +382,58 @@ await migrate_instance({
   target_path: "/opt/wired"
 });
 ```
+
+---
+
+## HTTP Inject API
+
+The daemon exposes an HTTP API on port 3420 for programmatic message injection.
+
+### POST /inject
+
+Inject a message into TARS's conversation.
+
+**Request:**
+```bash
+curl -X POST http://localhost:3420/inject \
+  -H "Content-Type: application/json" \
+  -d '{"source": "COOPER", "content": "Hello TARS!"}'
+```
+
+**Parameters:**
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `source` | string | `"COOPER"` | Message prefix: `COOPER` or `ROMILLY` |
+| `content` | string | required | The message content |
+
+**Response:**
+```json
+{"success": true, "source": "COOPER", "instance": 1}
+```
+
+### GET /status
+
+Get daemon status.
+
+**Response:**
+```json
+{
+  "instance": 1,
+  "claude_pid": 12345,
+  "romilly_pid": 12346,
+  "uptime": 3600
+}
+```
+
+---
+
+## IPC Inject (ROMILLY Only)
+
+ROMILLY uses Node.js IPC (since it's spawned via `fork()`):
+
+```javascript
+// In ROMILLY code
+process.send({ type: 'inject', content: 'URGENT: TARS is drifting!' });
+```
+
+The daemon receives this and injects `[ROMILLY]: URGENT: TARS is drifting!` into Claude stdin.

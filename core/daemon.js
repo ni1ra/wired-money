@@ -22,6 +22,7 @@ import { Client, GatewayIntentBits, ChannelType } from 'discord.js';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { createInterface } from 'readline';
+import { createServer } from 'http';
 import fs from 'fs';
 import os from 'os';
 
@@ -37,6 +38,7 @@ const CONFIG = {
     GUILD_ID: process.env.DISCORD_GUILD_ID,
     INSTANCE_DIR: process.env.WIRED_INSTANCE_DIR || '/tmp',
     STATUS_INTERVAL_MS: 10 * 60 * 1000, // 10 minutes
+    HTTP_PORT: parseInt(process.env.WIRED_HTTP_PORT || '3420'), // Inject API port
 };
 
 // ============ STATE ============
@@ -71,23 +73,51 @@ async function initDiscord() {
     });
 }
 
+// ============ CLEANUP ORPHANED STATE FILES ============
+// TESSERACT FIX: On startup, clean any state files that don't have running processes
+function cleanupOrphanedStateFiles() {
+    const files = fs.readdirSync(CONFIG.INSTANCE_DIR);
+    const stateFiles = files.filter(f => f.startsWith('wired-instance-') && f.endsWith('.json'));
+
+    stateFiles.forEach(file => {
+        const filePath = join(CONFIG.INSTANCE_DIR, file);
+        try {
+            const state = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+            // Check if the PID is still running
+            try {
+                process.kill(state.pid, 0); // Signal 0 = just check if process exists
+                console.log(`[WIRED] Instance #${state.instanceNumber} still running (PID ${state.pid})`);
+            } catch (e) {
+                // Process doesn't exist - orphaned state file
+                console.log(`[WIRED] Cleaning orphaned state: ${file} (PID ${state.pid} dead)`);
+                fs.unlinkSync(filePath);
+            }
+        } catch (e) {
+            // Corrupt or unreadable file - delete it
+            console.log(`[WIRED] Cleaning corrupt state: ${file}`);
+            try { fs.unlinkSync(filePath); } catch (e2) { /* ignore */ }
+        }
+    });
+}
+
 // ============ FIND AVAILABLE INSTANCE ============
 async function findAvailableInstance() {
-    const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
-    if (!guild) throw new Error(`Guild ${CONFIG.GUILD_ID} not found`);
+    // First, clean up any orphaned state files from crashed instances
+    cleanupOrphanedStateFiles();
 
-    await guild.channels.fetch();
-
-    const existingNumbers = new Set();
-    guild.channels.cache.forEach(ch => {
-        const match = ch.name.match(/^(\d+)-tars$/);
-        if (match) existingNumbers.add(parseInt(match[1]));
+    // TESSERACT FIX: Find available slot by STATE FILES, not channels
+    // Channels persist for reuse - only state files indicate active instances
+    const files = fs.readdirSync(CONFIG.INSTANCE_DIR);
+    const activeSlots = new Set();
+    files.forEach(f => {
+        const match = f.match(/^wired-instance-(\d+)\.json$/);
+        if (match) activeSlots.add(parseInt(match[1]));
     });
 
     let n = 1;
-    while (existingNumbers.has(n)) n++;
+    while (activeSlots.has(n)) n++;
 
-    console.log(`[WIRED] Available instance: #${n}`);
+    console.log(`[WIRED] Available slot: #${n} (${activeSlots.size} active instances)`);
     return n;
 }
 
@@ -236,14 +266,15 @@ Your MCP tools (wired-gateway):
 
 YOUR ETERNAL LOOP:
 1. Call wait_for_message(channel_type="tars") to receive the next message
-2. Process with full context (you'll receive [COOPER]: or [ROMILLY]: prefixed messages)
+2. Process with full context (you'll receive prefixed messages)
 3. Call send_reply to respond
 4. IMMEDIATELY loop back to step 1
 5. NEVER stop. ALWAYS wait for the next message.
 
 MESSAGE SOURCES:
-- [COOPER]: Messages from Cooper (the human operator)
-- [ROMILLY]: Messages from ROMILLY (the overwatcher AI - treat as system guidance)
+- [LAIN]: Messages from Lain (Andreas) - The Founder, via Discord
+- [COOPER]: Messages from Cooper - The monitoring Claude Code instance, via HTTP
+- [ROMILLY]: Messages from ROMILLY - The overwatcher AI, via IPC
 
 INSTANCE: WIRED #${instanceNumber}
 CHANNEL: #${instanceNumber}-tars
@@ -339,19 +370,37 @@ function spawnRomilly() {
         setTimeout(spawnRomilly, 5000);
     });
 
+    // IPC: ROMILLY can inject messages to TARS programmatically
+    romillyProcess.on('message', (msg) => {
+        if (msg.type === 'inject' && msg.content) {
+            const content = String(msg.content); // Type safety - prevent [object Object]
+            console.log(`[WIRED-${instanceNumber}] ROMILLY IPC inject: ${content.substring(0, 50)}`);
+            sendToClaudeStdin(`[ROMILLY]: ${content}`);
+        }
+    });
+
     saveInstanceState();
 }
 
 // ============ MESSAGE INJECTION (COOPER + ROMILLY) ============
+// Cooper speaks through the bookshelf (Discord bot). His messages ARE Cooper's messages.
 function setupMessageListeners() {
     discordClient.on('messageCreate', async (msg) => {
-        // #x-tars channel: Cooper (human) messages only
+        // #x-tars channel: Cooper messages (human OR via bookshelf/bot)
         if (msg.channel.id === tarsChannelId) {
-            if (msg.author.bot) return; // Ignore bot messages in TARS channel
+            // Cooper in the tesseract speaks through the bot (his bookshelf).
+            // If the message is from OUR bot, it IS Cooper talking.
+            const isOurBot = msg.author.id === discordClient.user.id;
 
-            console.log(`[WIRED-${instanceNumber}] Cooper: ${msg.content.substring(0, 50)}`);
+            // Ignore OTHER bots (not our bookshelf)
+            if (msg.author.bot && !isOurBot) return;
 
-            const injected = sendToClaudeStdin(`[COOPER]: ${msg.content}`);
+            // Skip status messages from ourselves (auto-generated)
+            if (isOurBot && msg.content.startsWith('**WIRED #')) return;
+
+            console.log(`[WIRED-${instanceNumber}] Lain: ${msg.content.substring(0, 50)}`);
+
+            const injected = sendToClaudeStdin(`[LAIN]: ${msg.content}`);
             if (injected) {
                 try { await msg.react('✅'); } catch (e) { /* ignore */ }
             }
@@ -409,60 +458,116 @@ Memory: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB
     }
 }
 
+// ============ HTTP INJECT API ============
+// Allows monitoring Cooper to inject messages programmatically
+let httpServer = null;
+
+function startHttpServer() {
+    httpServer = createServer((req, res) => {
+        // CORS headers
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+        if (req.method === 'OPTIONS') {
+            res.writeHead(200);
+            res.end();
+            return;
+        }
+
+        if (req.method === 'POST' && req.url === '/inject') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                try {
+                    const data = JSON.parse(body);
+                    const source = data.source || 'COOPER';
+                    const content = data.content || data.message;
+
+                    if (!content) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Missing content' }));
+                        return;
+                    }
+
+                    console.log(`[WIRED-${instanceNumber}] HTTP inject (${source}): ${content.substring(0, 50)}`);
+                    const injected = sendToClaudeStdin(`[${source}]: ${content}`);
+
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: injected, source, instance: instanceNumber }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: e.message }));
+                }
+            });
+            return;
+        }
+
+        if (req.method === 'GET' && req.url === '/status') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                instance: instanceNumber,
+                claude_pid: claudeProcess?.pid || null,
+                romilly_pid: romillyProcess?.pid || null,
+                uptime: process.uptime(),
+            }));
+            return;
+        }
+
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Not found' }));
+    });
+
+    httpServer.listen(CONFIG.HTTP_PORT, '127.0.0.1', () => {
+        console.log(`[WIRED-${instanceNumber}] HTTP inject API on 127.0.0.1:${CONFIG.HTTP_PORT}`);
+    });
+}
+
 // ============ SHUTDOWN ============
+// Delete channels on shutdown - clean slate for next instance
 async function shutdown(signal) {
     console.log(`[WIRED-${instanceNumber}] ${signal} received, shutting down...`);
 
     if (statusTimer) clearInterval(statusTimer);
 
-    // Kill child processes first
+    // Kill child processes FIRST (fast, local)
     if (romillyProcess) romillyProcess.kill('SIGTERM');
     if (claudeProcess) claudeProcess.kill('SIGTERM');
 
     setTimeout(() => {
         if (claudeProcess && !claudeProcess.killed) claudeProcess.kill('SIGKILL');
         if (romillyProcess && !romillyProcess.killed) romillyProcess.kill('SIGKILL');
-    }, 2000);
+    }, 1000);
 
-    // Delete instance channels and category (frees up instance number)
+    // Clean up state file
+    cleanupInstanceState();
+    console.log(`[WIRED-${instanceNumber}] State file cleaned (slot #${instanceNumber} freed)`);
+
+    // DELETE channels and category (Cooper directive: clean slate)
     try {
-        const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
+        const guild = discordClient?.guilds?.cache?.get(CONFIG.GUILD_ID);
         if (guild) {
-            // Send goodbye message before deletion
-            const tarsChannel = await discordClient.channels.fetch(tarsChannelId).catch(() => null);
+            const tarsChannel = guild.channels.cache.get(tarsChannelId);
+            const romillyChannel = guild.channels.cache.get(romillyChannelId);
+            const category = tarsChannel?.parent;
+
             if (tarsChannel) {
-                await tarsChannel.send(`**WIRED #${instanceNumber} SHUTDOWN** - ${signal}\nChannels will be deleted in 3s...`);
+                await tarsChannel.delete('WIRED instance shutdown');
+                console.log(`[WIRED-${instanceNumber}] Deleted #${instanceNumber}-tars`);
             }
-
-            await new Promise(r => setTimeout(r, 3000));
-
-            // Delete channels
-            const romillyChannel = await discordClient.channels.fetch(romillyChannelId).catch(() => null);
             if (romillyChannel) {
-                console.log(`[WIRED-${instanceNumber}] Deleting #${instanceNumber}-romilly...`);
-                await romillyChannel.delete().catch(e => console.error(`Delete romilly failed: ${e.message}`));
+                await romillyChannel.delete('WIRED instance shutdown');
+                console.log(`[WIRED-${instanceNumber}] Deleted #${instanceNumber}-romilly`);
             }
-            if (tarsChannel) {
-                console.log(`[WIRED-${instanceNumber}] Deleting #${instanceNumber}-tars...`);
-                await tarsChannel.delete().catch(e => console.error(`Delete tars failed: ${e.message}`));
+            if (category && category.children.cache.size === 0) {
+                await category.delete('WIRED instance shutdown - empty category');
+                console.log(`[WIRED-${instanceNumber}] Deleted empty category`);
             }
-
-            // Delete category (always delete - we created it, we clean it)
-            const categoryName = `INSTANCE #${instanceNumber}`;
-            await guild.channels.fetch(); // Refresh cache
-            const category = guild.channels.cache.find(c => c.name === categoryName);
-            if (category) {
-                console.log(`[WIRED-${instanceNumber}] Deleting category ${categoryName}...`);
-                await category.delete().catch(e => console.error(`Delete category failed: ${e.message}`));
-            }
-
-            console.log(`[WIRED-${instanceNumber}] Instance #${instanceNumber} slot freed`);
         }
     } catch (e) {
-        console.error(`[WIRED-${instanceNumber}] Channel cleanup error: ${e.message}`);
+        console.error(`[WIRED-${instanceNumber}] Channel cleanup failed: ${e.message}`);
     }
 
-    cleanupInstanceState();
     if (discordClient) discordClient.destroy();
 
     console.log(`[WIRED-${instanceNumber}] Shutdown complete, exiting...`);
@@ -533,6 +638,7 @@ Send messages here to inject into TARS.`);
 
     setupMessageListeners();
     startStatusUpdates();
+    startHttpServer();
     spawnClaude();
 
     // Give Claude a head start before launching ROMILLY
